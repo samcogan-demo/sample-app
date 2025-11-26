@@ -1,0 +1,91 @@
+# Azure DevOps Pipeline - Sample Application
+# This pipeline demonstrates cross-organization template usage
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - README.md
+      - docs/**
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: imageName
+    value: 'sampleapp'
+  - name: containerRegistry
+    value: 'myACR'  # Replace with your Azure Container Registry service connection name
+  - name: imageTag
+    value: '$(Build.BuildId)'
+
+# Reference the cross-org template repository
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: samcogan-templates/azure-pipeline-templates
+      endpoint: GitHubConnection  # Replace with your GitHub service connection name
+      ref: refs/heads/main
+
+stages:
+  # Build Stage
+  - stage: Build
+    displayName: 'Build Application'
+    jobs:
+      # Use the code build template from the cross-org repository
+      - template: templates/code-build.yml@templates
+        parameters:
+          buildTool: 'dotnet'
+          buildConfiguration: 'Release'
+          projectPath: '.'
+          runTests: false  # No tests in this simple demo
+          publishArtifacts: true
+      
+      # Use the container build template
+      - template: templates/container-build.yml@templates
+        parameters:
+          dockerfilePath: 'Dockerfile'
+          imageName: $(imageName)
+          imageTag: $(imageTag)
+          containerRegistry: $(containerRegistry)
+          buildContext: '.'
+  
+  # Security Scan Stage
+  - stage: SecurityScan
+    displayName: 'Security Scanning'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      # Use the security scan template
+      - template: templates/security-scan.yml@templates
+        parameters:
+          scanType: 'all'
+          imageName: $(imageName)
+          imageTag: $(imageTag)
+          failOnSeverity: 'HIGH'
+  
+  # Deploy to Dev Stage
+  - template: templates/deploy-stage.yml@templates
+    parameters:
+      environment: 'Development'
+      serviceConnection: 'AzureDevConnection'  # Replace with your Azure service connection
+      deploymentType: 'container'
+      resourceName: 'sampleapp-dev'  # Replace with your Azure App Service name
+      imageName: $(imageName)
+      imageTag: $(imageTag)
+      requiresApproval: false
+  
+  # Deploy to Production Stage
+  - template: templates/deploy-stage.yml@templates
+    parameters:
+      environment: 'Production'
+      serviceConnection: 'AzureDevConnection'  # Replace with your Azure service connection
+      deploymentType: 'container'
+      resourceName: 'sampleapp-prod'  # Replace with your Azure App Service name
+      imageName: $(imageName)
+      imageTag: $(imageTag)
+      requiresApproval: true
