@@ -1,0 +1,192 @@
+name: Demo Reusable Workflows
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  # Use the hello-world reusable workflow
+  greet:
+    name: Welcome Message
+    uses: samcogan-templates/reusable-actions-demo/.github/workflows/hello-world.yml@main
+    with:
+      name: ${{ github.actor }}
+      message: 'Welcome to the demo'
+
+  # Use the security scan reusable workflow
+  security:
+    name: Security Scanning
+    uses: samcogan-templates/reusable-actions-demo/.github/workflows/security-scan.yml@main
+    with:
+      scan-type: 'all'
+      fail-on-severity: 'critical'
+
+  # Use the build and test reusable workflow
+  build:
+    name: Build and Test
+    needs: security
+    uses: samcogan-templates/reusable-actions-demo/.github/workflows/build-and-test.yml@main
+    with:
+      node-version: '20'
+      run-tests: true
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Regular job using custom actions to report results
+  report-results:
+    name: Report Build Results
+    runs-on: ubuntu-latest
+    needs: [greet, security, build]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - name: Determine overall status
+        id: status
+        run: |
+          if [[ "${{ needs.build.result }}" == "success" && "${{ needs.security.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+            echo "message=All checks passed!" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.build.result }}" == "failure" || "${{ needs.security.result }}" == "failure" ]]; then
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+            echo "message=Some checks failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=warning" >> $GITHUB_OUTPUT
+            echo "emoji=⚠️" >> $GITHUB_OUTPUT
+            echo "message=Checks completed with warnings" >> $GITHUB_OUTPUT
+          fi
+
+      # Use custom action to add labels based on results
+      - name: Add status labels
+        uses: samcogan-templates/reusable-actions-demo/actions/label-manager@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          add-labels: ${{ steps.status.outputs.status == 'success' && 'ci-passed, ready-for-review' || 'ci-failed, needs-attention' }}
+          remove-labels: ${{ steps.status.outputs.status == 'success' && 'ci-failed, needs-attention' || 'ci-passed, ready-for-review' }}
+
+      # Use custom action to create status check
+      - name: Create status check
+        uses: samcogan-templates/reusable-actions-demo/actions/status-check@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          status: ${{ steps.status.outputs.status }}
+          context: 'Complete Pipeline'
+          description: ${{ steps.status.outputs.message }}
+          target-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # Use custom action to comment with comprehensive results
+      - name: Post results summary
+        uses: samcogan-templates/reusable-actions-demo/actions/comment-pr@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment-tag: 'pipeline-results'
+          update-existing: 'true'
+          comment-body: |
+            ## ${{ steps.status.outputs.emoji }} Pipeline Results
+            
+            **Greeting:** ${{ needs.greet.outputs.greeting }}
+            
+            ### Job Status Summary
+            
+            | Job | Status | Result |
+            |-----|--------|--------|
+            | Security Scan | ${{ needs.security.result == 'success' && '✅' || '❌' }} | ${{ needs.security.result }} |
+            | Build & Test | ${{ needs.build.result == 'success' && '✅' || '❌' }} | ${{ needs.build.result }} |
+            
+            **Build Status:** ${{ needs.build.outputs.build-status }}
+            **Security Vulnerabilities:** ${{ needs.security.outputs.vulnerabilities-found }}
+            
+            ### Details
+            
+            - **Triggered by:** @${{ github.actor }}
+            - **Branch:** `${{ github.head_ref }}`
+            - **Commit:** ${{ github.sha }}
+            - **Workflow Run:** [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ---
+            
+            ${{ steps.status.outputs.status == 'success' && '🎉 Great work! All checks passed and your PR is ready for review.' || '⚠️ Please review the failed checks and make necessary corrections.' }}
+
+  # Create an issue if the build fails on main branch
+  create-failure-issue:
+    name: Create Failure Issue
+    runs-on: ubuntu-latest
+    needs: [build, security]
+    if: failure() && github.ref == 'refs/heads/main'
+    steps:
+      - name: Create issue for main branch failure
+        id: create-issue
+        uses: samcogan-templates/reusable-actions-demo/actions/create-issue@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          title: '🚨 Pipeline failed on main branch'
+          labels: 'critical, pipeline-failure, automated'
+          assignees: ${{ github.actor }}
+          body: |
+            ## 🚨 Critical: Pipeline Failure on Main Branch
+            
+            The CI/CD pipeline has failed on the `main` branch.
+            
+            ### Failure Details
+            
+            - **Build Status:** ${{ needs.build.result }}
+            - **Security Status:** ${{ needs.security.result }}
+            - **Triggered by:** @${{ github.actor }}
+            - **Commit:** ${{ github.sha }}
+            - **Timestamp:** ${{ github.event.head_commit.timestamp }}
+            
+            ### Failed Jobs
+            
+            ${{ needs.build.result == 'failure' && '- ❌ Build & Test\n' || '' }}${{ needs.security.result == 'failure' && '- ❌ Security Scan\n' || '' }}
+            
+            ### Action Required
+            
+            This is a high-priority issue that needs immediate attention. The main branch should always be in a working state.
+            
+            **Workflow Run:** [View Failed Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ### Next Steps
+            
+            1. Review the workflow logs
+            2. Identify the root cause
+            3. Create a hotfix if necessary
+            4. Update this issue with findings
+            
+            ---
+            *This issue was automatically created by the pipeline monitoring workflow.*
+      
+      - name: Comment on issue with additional info
+        if: steps.create-issue.outputs.issue-number != ''
+        uses: samcogan-templates/reusable-actions-demo/actions/comment-pr@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pr-number: ${{ steps.create-issue.outputs.issue-number }}
+          comment-body: |
+            ### 📊 Additional Context
+            
+            **Repository:** ${{ github.repository }}
+            **Workflow:** ${{ github.workflow }}
+            **Run Number:** #${{ github.run_number }}
+            **Attempt:** ${{ github.run_attempt }}
+            
+            cc: @${{ github.repository_owner }}
+
+  # Use the Slack notification reusable workflow (optional - requires SLACK_WEBHOOK_URL secret)
+  notify:
+    name: Send Notifications
+    needs: [build, security]
+    if: always() && github.ref == 'refs/heads/main'
+    uses: samcogan-templates/reusable-actions-demo/.github/workflows/notify-slack.yml@main
+    with:
+      message: |
+        Pipeline completed for ${{ github.repository }}
+        Status: ${{ needs.build.result == 'success' && needs.security.result == 'success' && 'SUCCESS' || 'FAILED' }}
+        Branch: main
+        Commit: ${{ github.sha }}
+      status: ${{ needs.build.result == 'success' && needs.security.result == 'success' && 'success' || 'failure' }}
+      channel: '#deployments'
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
