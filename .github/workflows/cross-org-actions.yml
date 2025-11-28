@@ -1,0 +1,209 @@
+name: Demo Custom Actions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      demo-type:
+        description: 'Type of demo to run'
+        required: false
+        type: choice
+        options:
+          - 'full'
+          - 'build-only'
+          - 'labels-only'
+        default: 'full'
+
+jobs:
+  setup-and-build:
+    name: Setup Environment and Build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # Use the setup-environment action
+      - name: Setup development environment
+        id: setup
+        uses: samcogan-templates/reusable-actions-demo/actions/setup-environment@main
+        with:
+          node-version: '20'
+          enable-cache: 'true'
+          install-dependencies: 'true'
+      
+      # Add labels to the PR
+      - name: Add build labels
+        uses: samcogan-templates/reusable-actions-demo/actions/label-manager@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          add-labels: 'build-in-progress, automated'
+      
+      # Create a pending status check
+      - name: Set pending status
+        uses: samcogan-templates/reusable-actions-demo/actions/status-check@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          status: 'pending'
+          context: 'Demo Build'
+          description: 'Building the application...'
+      
+      # Simulate a build process
+      - name: Run build
+        id: build
+        run: |
+          echo "Running build process..."
+          sleep 5
+          
+          # Simulate build success/failure (90% success rate for demo)
+          if [ $((RANDOM % 10)) -lt 9 ]; then
+            echo "Build successful!"
+            echo "build_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "Build failed!"
+            echo "build_status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+      
+      # Update status check on success
+      - name: Set success status
+        if: success()
+        uses: samcogan-templates/reusable-actions-demo/actions/status-check@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          status: 'success'
+          context: 'Demo Build'
+          description: 'Build completed successfully'
+          target-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      
+      # Update status check on failure
+      - name: Set failure status
+        if: failure()
+        uses: samcogan-templates/reusable-actions-demo/actions/status-check@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          status: 'failure'
+          context: 'Demo Build'
+          description: 'Build failed'
+          target-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      
+      # Comment on PR with build results
+      - name: Comment build success
+        if: success()
+        uses: samcogan-templates/reusable-actions-demo/actions/comment-pr@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment-tag: 'build-status'
+          update-existing: 'true'
+          comment-body: |
+            ## ✅ Build Successful!
+            
+            **Environment Details:**
+            - Node.js: ${{ steps.setup.outputs.node-version }}
+            - Cache Hit: ${{ steps.setup.outputs.cache-hit }}
+            - Workflow: [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            All checks passed! Ready for review. 🚀
+      
+      - name: Comment build failure
+        if: failure()
+        uses: samcogan-templates/reusable-actions-demo/actions/comment-pr@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment-tag: 'build-status'
+          update-existing: 'true'
+          comment-body: |
+            ## ❌ Build Failed
+            
+            The build process encountered errors.
+            
+            **Workflow:** [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            Please review the logs and fix the issues.
+      
+      # Update labels based on build result
+      - name: Update labels on success
+        if: success()
+        uses: samcogan-templates/reusable-actions-demo/actions/label-manager@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          add-labels: 'build-success, ready-for-review'
+          remove-labels: 'build-in-progress, build-failed'
+      
+      - name: Update labels on failure
+        if: failure()
+        uses: samcogan-templates/reusable-actions-demo/actions/label-manager@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          add-labels: 'build-failed, needs-fix'
+          remove-labels: 'build-in-progress, build-success'
+
+  create-follow-up-issue:
+    name: Create Follow-up Issue
+    runs-on: ubuntu-latest
+    needs: setup-and-build
+    if: failure() && github.event_name == 'pull_request'
+    steps:
+      - name: Create issue for failed build
+        uses: samcogan-templates/reusable-actions-demo/actions/create-issue@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          title: 'Build failed for PR #${{ github.event.pull_request.number }}'
+          labels: 'bug, build-failure, automated'
+          body: |
+            ## Build Failure Report
+            
+            A build failure occurred for PR #${{ github.event.pull_request.number }}.
+            
+            **PR Details:**
+            - Title: ${{ github.event.pull_request.title }}
+            - Author: @${{ github.event.pull_request.user.login }}
+            - Branch: `${{ github.head_ref }}`
+            
+            **Workflow Run:**
+            - [View Failed Workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            **Action Required:**
+            Please investigate and resolve the build issues.
+            
+            ---
+            *This issue was created automatically by the Demo Custom Actions workflow.*
+
+  respond-to-comment:
+    name: Respond to Comments
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '/demo')
+    steps:
+      - name: Add reaction to comment
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -f content='rocket'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Reply to comment
+        uses: samcogan-templates/reusable-actions-demo/actions/comment-pr@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment-body: |
+            👋 Hey @${{ github.event.comment.user.login }}!
+            
+            You triggered the demo command. This demonstrates how custom actions can:
+            - ✅ Respond to issue comments
+            - ✅ Add reactions
+            - ✅ Post follow-up comments
+            - ✅ Manage labels and status checks
+            
+            Pretty cool, right? 🚀
+      
+      - name: Add demo label
+        uses: samcogan-templates/reusable-actions-demo/actions/label-manager@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          add-labels: 'demo-triggered'
